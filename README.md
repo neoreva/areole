@@ -1,2 +1,2 @@
 # areole
-A minecraft command parser for Minecraft Bedrock and Java
+A minecraft command parser written in rust for Minecraft Bedrock and Java
