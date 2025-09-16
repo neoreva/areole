@@ -22,6 +22,7 @@ pub trait Parse<'src, T = Self> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum ParseError<'src> {
     LexError(LexError),
+    // TODO: add a method to notate what kind of token was expected
     InvalidToken(Token<'src>),
     // TODO: Make spesific errors like:
     // "x" is not a valid number

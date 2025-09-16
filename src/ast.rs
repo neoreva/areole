@@ -3,7 +3,7 @@ use std::{borrow::Cow, iter::Peekable};
 use crate::{
     parser::{Parse, ParseError, ParseResult},
     span::{Span, Spanned},
-    token::{Kind, Token, TokenIter},
+    token::{Kind, LexError, Token, TokenIter},
 };
 
 macro_rules! extract_token {
@@ -193,9 +193,25 @@ impl<'src> Spanned for QueryParams<'src> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryField<'src> {
     key: Ident<'src>,
-    assign: Token<'src>,
+    eq: Token<'src>,
     value: Option<Expr<'src>>,
     comma: Option<Token<'src>>,
+}
+
+impl<'src> QueryField<'src> {
+    pub fn new(
+        key: Ident<'src>,
+        assign: Token<'src>,
+        value: Option<Expr<'src>>,
+        comma: Option<Token<'src>>,
+    ) -> Self {
+        Self {
+            key,
+            eq: assign,
+            value,
+            comma,
+        }
+    }
 }
 
 impl<'src> Spanned for QueryField<'src> {
@@ -207,20 +223,66 @@ impl<'src> Spanned for QueryField<'src> {
             if let Some(s) = &self.value {
                 break 'end s.span().end;
             }
-            self.assign.span.end
+            self.eq.span.end
         })
+    }
+}
+
+impl<'src> Parse<'src> for QueryField<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        let ident = Ident::parse(tokens)?;
+
+        let assign = extract_token!(tokens, Kind::Equal);
+
+       let value =  match tokens.peek() {
+            // TODO: Make this support ! and , 
+            Some(Ok(_)) => Expr::parse(tokens)?,
+            Some(Err(err)) => return Err(ParseError::LexError(err.clone())),
+            None => return Err(ParseError::Eof),
+        };
+
+
+        let value = ;
+
+        let comma = extract_token!(tokens, Option<Kind::Comma>);
+
+        Ok(QueryField::new(ident, assign, value, comma))
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ident<'src> {
-    span: Span,
     value: Cow<'src, str>,
+    span: Span,
+}
+
+impl<'src> Ident<'src> {
+    pub fn new(value: Cow<'src, str>, span: Span) -> Self {
+        Self { value, span }
+    }
 }
 
 impl<'src> Spanned for Ident<'src> {
     fn span(&self) -> Span {
         self.span.clone()
+    }
+}
+
+impl<'src> Parse<'src> for Ident<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        let token = match tokens.next() {
+            Some(s) => s,
+            None => return Err(ParseError::Eof),
+        };
+        match token {
+            Ok(Token {
+                span,
+                kind: Kind::Ident(s),
+            }) => Ok(Ident::new(Cow::Borrowed(s), span)),
+
+            Ok(tok) => Err(ParseError::InvalidToken(tok)),
+            Err(e) => Err(ParseError::LexError(e)),
+        }
     }
 }
 
@@ -254,7 +316,7 @@ impl<'src> Spanned for ExprRange<'src> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprUrnary<'src> {
     pub op: UnOp<'src>,
-    pub expr: Box<Expr<'src>>,
+    pub expr: Option<Box<Expr<'src>>>,
 }
 
 impl<'src> ExprUrnary<'src> {
@@ -298,6 +360,7 @@ impl<'src> Spanned for UnOp<'src> {
         }
     }
 }
+
 impl<'src> Parse<'src> for ExprUrnary<'src> {
     fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
         let op = {
@@ -365,6 +428,30 @@ impl<'src> Spanned for Lit<'src> {
             Lit::Float(f) => f.span.clone(),
             Lit::Path(p) => p.span.clone(),
         }
+    }
+}
+
+impl<'src> Parse<'src> for Lit<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        let token = match tokens.peek() {
+            Some(s) => s,
+            None => return Err(ParseError::Eof),
+        };
+
+        let token @ Token { kind, span: _ } = match token {
+            Ok(ok) => ok,
+            Err(e) => return Err(ParseError::LexError(e.clone())),
+        };
+
+        Ok(match kind {
+            Kind::Float(_) => Lit::Float(LitFloat::parse(tokens)?),
+            Kind::Int(_) => Lit::Int(LitInt::parse(tokens)?),
+            Kind::String(_) => Lit::String(LitString::parse(tokens)?),
+            Kind::Path(_) => Lit::Path(LitPath::parse(tokens)?),
+            Kind::Bool(_) => Lit::Bool(LitBool::parse(tokens)?),
+
+            _ => return Err(ParseError::InvalidToken(token.clone())),
+        })
     }
 }
 

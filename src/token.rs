@@ -106,8 +106,11 @@ pub enum Kind<'src> {
     #[regex("[0-9]+", |lex| lex.slice().parse(),  priority=3,)]
     Int(u32),
 
-    #[regex("(\"[^\"]+\")|([a-z_.A-Z0-9]+)")]
+    #[regex("\"[^\"]+\"")]
     String(&'src str),
+
+    #[regex("[a-z_.A-Z0-9]+")]
+    Ident(&'src str),
 
     #[regex("[a-z_:.A-Z0-9]+/[a-z_:.A-Z0-9/]+", priority = 1)]
     Path(&'src str),
