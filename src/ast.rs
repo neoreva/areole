@@ -64,9 +64,16 @@ impl<'src> Function<'src> {
         Self { statements }
     }
 }
+
 impl<'src> Parse<'src> for Function<'src> {
     fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
-        todo!()
+        let mut statements = Vec::new();
+        while tokens.peek().is_some() {
+            let statement = Stmt::parse(tokens)?;
+
+            statements.push(statement)
+        }
+        Ok(Function::new(statements))
     }
 }
 
@@ -100,11 +107,41 @@ impl<'src> Spanned for Stmt<'src> {
     }
 }
 
+impl<'src> Parse<'src> for Stmt<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        match tokens.peek() {
+            Some(Ok(Token {
+                kind: Kind::Comment(_),
+                span: _,
+            })) => Ok(Stmt::Comment(StmtComment::parse(tokens)?)),
+
+            Some(Ok(_)) => Ok(Stmt::Command(StmtCommand::parse(tokens)?)),
+
+            Some(Err(err)) => Err(ParseError::LexError(err.clone())),
+            None => Err(ParseError::Eof),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StmtCommand<'src> {
     slash: Option<Token<'src>>,
     ident: Ident<'src>,
     arguments: Option<Vec<Expr<'src>>>,
+}
+
+impl<'src> StmtCommand<'src> {
+    pub fn new(
+        slash: Option<Token<'src>>,
+        ident: Ident<'src>,
+        arguments: Option<Vec<Expr<'src>>>,
+    ) -> Self {
+        Self {
+            slash,
+            ident,
+            arguments,
+        }
+    }
 }
 
 impl<'src> Spanned for StmtCommand<'src> {
@@ -121,6 +158,32 @@ impl<'src> Spanned for StmtCommand<'src> {
                 self.ident.span.end
             },
         )
+    }
+}
+
+impl<'src> Parse<'src> for StmtCommand<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        let slash = extract_token!(tokens, Option<Kind::Slash>);
+
+        let ident = Ident::parse(tokens)?;
+
+        if tokens.peek().is_none() {
+            return Ok(StmtCommand::new(slash, ident, None));
+        }
+
+        let mut arguments = vec![];
+
+        loop {
+            let expr = Expr::parse(tokens)?;
+
+            arguments.push(expr);
+
+            if tokens.peek().is_none() {
+                break;
+            }
+        }
+
+        Ok(StmtCommand::new(slash, ident, Some(arguments)))
     }
 }
 
@@ -147,7 +210,7 @@ impl<'src> Spanned for Expr<'src> {
 
 impl<'src> Parse<'src> for Expr<'src> {
     fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
-        todo!()
+        match tokens.peek() {}
     }
 }
 
@@ -156,7 +219,7 @@ pub struct ExprTarget<'src> {
     /// `@`
     select: Token<'src>,
     target: Ident<'src>,
-    params: Option<QueryParams<'src>>,
+    params: Option<Table<'src, Ident<'src>>>,
 }
 
 impl<'src> Spanned for ExprTarget<'src> {
@@ -173,34 +236,63 @@ impl<'src> Spanned for ExprTarget<'src> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryParams<'src> {
+pub struct Table<'src, K> {
     brackets: (Token<'src>, Token<'src>),
-    fields: Vec<QueryField<'src>>,
+    fields: Vec<TableField<'src, K>>,
 }
 
-impl<'src> QueryParams<'src> {
-    pub fn new(brackets: (Token<'src>, Token<'src>), fields: Vec<QueryField<'src>>) -> Self {
+impl<'src, K> Table<'src, K> {
+    pub fn new(brackets: (Token<'src>, Token<'src>), fields: Vec<TableField<'src, K>>) -> Self {
         Self { brackets, fields }
     }
 }
 
-impl<'src> Spanned for QueryParams<'src> {
+impl<'src, K> Spanned for Table<'src, K> {
     fn span(&self) -> Span {
         Span::new(self.brackets.0.span.start, self.brackets.1.span.end)
     }
 }
 
+impl<'src, K> Parse<'src> for Table<'src, K>
+where
+    K: Parse<'src>,
+{
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        let open = extract_token!(tokens, Kind::LeftBracket);
+
+        // A Vec does not allocate right away.
+        let mut fields = vec![];
+
+        loop {
+            let field = TableField::<'src, K>::parse(tokens)?;
+            fields.push(field);
+            match tokens.peek() {
+                Some(Ok(Token {
+                    kind: Kind::RightBracket,
+                    span: _,
+                })) => break,
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => return Err(ParseError::LexError(e.clone())),
+                None => return Err(ParseError::Eof),
+            }
+        }
+        let close = extract_token!(tokens, Kind::RightBracket);
+
+        Ok(Table::new((open, close), fields))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryField<'src> {
-    key: Ident<'src>,
+pub struct TableField<'src, K> {
+    key: K,
     eq: Token<'src>,
     value: Option<Expr<'src>>,
     comma: Option<Token<'src>>,
 }
 
-impl<'src> QueryField<'src> {
+impl<'src, K> TableField<'src, K> {
     pub fn new(
-        key: Ident<'src>,
+        key: K,
         assign: Token<'src>,
         value: Option<Expr<'src>>,
         comma: Option<Token<'src>>,
@@ -214,39 +306,95 @@ impl<'src> QueryField<'src> {
     }
 }
 
-impl<'src> Spanned for QueryField<'src> {
+#[derive(Debug, Clone, PartialEq)]
+struct Delimited<Opn, T, Cls> {
+    open: Opn,
+    inner: T,
+    close: Cls,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Field<K, Eq, V> {
+    key: K,
+    eq: Eq,
+    value: V,
+}
+
+struct Separated<T, Sep, const IS_TRAILING: bool> {
+    // This uses an SOA.
+    values: Vec<T>,
+    separators: Vec<Sep>,
+}
+
+impl<K, S, V> Spanned for Field<K, S, V>
+where
+    K: Spanned,
+    V: Spanned,
+{
     fn span(&self) -> Span {
-        Span::new(self.key.span.start, 'end: {
-            if let Some(s) = &self.comma {
-                break 'end s.span.end;
-            }
-            if let Some(s) = &self.value {
-                break 'end s.span().end;
-            }
-            self.eq.span.end
-        })
+        Span::new(self.key.span().start, self.value.span().end)
     }
 }
 
-impl<'src> Parse<'src> for QueryField<'src> {
+impl<'src, K> Parse<'src> for TableField<'src, K>
+where
+    K: Parse<'src>,
+{
     fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
-        let ident = Ident::parse(tokens)?;
+        let ident = K::parse(tokens)?;
 
         let assign = extract_token!(tokens, Kind::Equal);
+        let mut comma = None;
 
-       let value =  match tokens.peek() {
-            // TODO: Make this support ! and , 
-            Some(Ok(_)) => Expr::parse(tokens)?,
+        let value = match tokens.peek() {
+            Some(Ok(Token {
+                kind: Kind::Comma,
+                span: _,
+            })) => {
+                comma = extract_token!(tokens, Option<Kind::Comma>);
+                None
+            }
+            Some(Ok(Token {
+                kind: Kind::Not,
+                span: _,
+            })) => {
+                // TODO: This could just take the span from the `_` and
+                // simply clone, rather than extracting the token,
+                // but this should be fine for now
+                let not = if let Some(s) = tokens.next()
+                    && let Ok(token) = s
+                {
+                    token
+                } else {
+                    unreachable!()
+                };
+
+                let expr = if let Some(Ok(Token {
+                    kind: Kind::Comma,
+                    span: _,
+                })) = tokens.peek()
+                {
+                    comma = extract_token!(tokens, Option<Kind::Comma>);
+                    None
+                } else {
+                    Some(Box::new(Expr::parse(tokens)?))
+                };
+
+                let urnary = ExprUrnary::new(UnOp::Not(not), expr);
+
+                Some(Expr::Urnary(urnary))
+            }
+            Some(Ok(_)) => {
+                let expr = Expr::parse(tokens)?;
+
+                comma = extract_token!(tokens, Option<Kind::Comma>);
+                Some(expr)
+            }
             Some(Err(err)) => return Err(ParseError::LexError(err.clone())),
             None => return Err(ParseError::Eof),
         };
 
-
-        let value = ;
-
-        let comma = extract_token!(tokens, Option<Kind::Comma>);
-
-        Ok(QueryField::new(ident, assign, value, comma))
+        Ok(TableField::new(ident, assign, value, comma))
     }
 }
 
@@ -288,12 +436,18 @@ impl<'src> Parse<'src> for Ident<'src> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprRange<'src> {
-    start: Option<Box<Expr<'src>>>,
+    start: Option<LitInt>,
 
     /// `..`
     limit: Token<'src>,
 
-    end: Option<Box<Expr<'src>>>,
+    end: Option<LitInt>,
+}
+
+impl<'src> ExprRange<'src> {
+    pub fn new(start: Option<LitInt>, limit: Token<'src>, end: Option<LitInt>) -> Self {
+        Self { start, limit, end }
+    }
 }
 
 impl<'src> Spanned for ExprRange<'src> {
@@ -313,6 +467,30 @@ impl<'src> Spanned for ExprRange<'src> {
     }
 }
 
+impl<'src> Parse<'src> for ExprRange<'src> {
+    fn parse(tokens: &mut Peekable<TokenIter<'src>>) -> ParseResult<'src, Self> {
+        fn parse_opt_int<'src>(
+            tokens: &mut Peekable<TokenIter<'src>>,
+        ) -> ParseResult<'src, Option<LitInt>> {
+            Ok(match tokens.peek() {
+                Some(Ok(Token {
+                    kind: Kind::Int(_),
+                    span: _,
+                })) => Some(LitInt::parse(tokens)?),
+                Some(Ok(_)) => None,
+                Some(Err(err)) => return Err(ParseError::LexError(err.clone())),
+                None => return Err(ParseError::Eof),
+            })
+        }
+
+        let start = parse_opt_int(tokens)?;
+        let limit = extract_token!(tokens, Kind::Limit);
+        let end = parse_opt_int(tokens)?;
+
+        Ok(ExprRange::new(start, limit, end))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprUrnary<'src> {
     pub op: UnOp<'src>,
@@ -320,14 +498,23 @@ pub struct ExprUrnary<'src> {
 }
 
 impl<'src> ExprUrnary<'src> {
-    pub fn new(op: UnOp<'src>, expr: Box<Expr<'src>>) -> Self {
+    pub fn new(op: UnOp<'src>, expr: Option<Box<Expr<'src>>>) -> Self {
         Self { op, expr }
     }
 }
 
 impl<'src> Spanned for ExprUrnary<'src> {
     fn span(&self) -> Span {
-        Span::new(self.op.span().start, self.expr.span().end)
+        let op_span = self.op.span();
+
+        Span::new(
+            op_span.start,
+            if let Some(s) = &self.expr {
+                s.span().end
+            } else {
+                op_span.end
+            },
+        )
     }
 }
 
@@ -336,9 +523,9 @@ pub enum UnOp<'src> {
     /// `!`
     Not(Token<'src>),
 
-    /// `-`
-    Neg(Token<'src>),
-
+    ///// `-`
+    //Neg(Token<'src>),
+    //
     /// `~`
     LocalCoordinate(Token<'src>),
 
@@ -353,7 +540,7 @@ impl<'src> Spanned for UnOp<'src> {
     fn span(&self) -> Span {
         match self {
             UnOp::Not(token) => token.span(),
-            UnOp::Neg(token) => token.span(),
+            // UnOp::Neg(token) => token.span(),
             UnOp::LocalCoordinate(token) => token.span(),
             UnOp::RelativeCoordinate(token) => token.span(),
             UnOp::FormatSelection(token) => token.span(),
@@ -375,12 +562,12 @@ impl<'src> Parse<'src> for ExprUrnary<'src> {
                         kind: Kind::Not,
                     },
                 ) => UnOp::Not(t),
-                Ok(
-                    t @ Token {
-                        span: _,
-                        kind: Kind::Neg,
-                    },
-                ) => UnOp::Neg(t),
+                // Ok(
+                //     t @ Token {
+                //         span: _,
+                //         kind: Kind::Neg,
+                //     },
+                // ) => UnOp::Neg(t),
                 Ok(
                     t @ Token {
                         span: _,
@@ -404,9 +591,10 @@ impl<'src> Parse<'src> for ExprUrnary<'src> {
             }
         };
 
+        // TODO: Support ~~~
         let expr = Expr::parse(tokens)?;
 
-        Ok(Self::new(op, Box::new(expr)))
+        Ok(Self::new(op, Some(Box::new(expr))))
     }
 }
 
@@ -457,12 +645,12 @@ impl<'src> Parse<'src> for Lit<'src> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LitInt {
-    pub value: u32,
+    pub value: i32,
     pub span: Span,
 }
 
 impl LitInt {
-    pub fn new(value: u32, span: Span) -> Self {
+    pub fn new(value: i32, span: Span) -> Self {
         Self { value, span }
     }
 }

@@ -100,11 +100,11 @@ pub enum Kind<'src> {
     #[regex("§.")]
     FormatSelection,
 
-    #[regex(r"-[0-9]*\.?[0-9]+", |lex| lex.slice().parse())]
+    #[regex(r"-?[0-9]*\.[0-9]+", |lex| lex.slice().parse(), priority =3)]
     Float(f32),
 
-    #[regex("[0-9]+", |lex| lex.slice().parse(),  priority=3,)]
-    Int(u32),
+    #[regex("-?[0-9]+", |lex| lex.slice().parse(),  priority=3,)]
+    Int(i32),
 
     #[regex("\"[^\"]+\"")]
     String(&'src str),
@@ -144,7 +144,7 @@ pub enum Kind<'src> {
     Not,
 
     #[token("..")]
-    Range,
+    Limit,
     /// Acts as `Equal` for scoreboards
     #[token("=")]
     Assign,
